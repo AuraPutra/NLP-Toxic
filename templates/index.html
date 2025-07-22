@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Brando Toxic Oracle</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+</head>
+<body>
+  <div class="container">
+    <canvas id="bg"></canvas>
+
+    <div class="card">
+      <h1>Toxic - By Dr Brando</h1>
+      <p>Rekam suara atau tulis teks:</p>
+      <textarea id="inputText" placeholder="Teks dsni"></textarea>
+      <button onclick="submitText()">✨ Terawang Teks</button>
+      <button onclick="startRecording()">🎤 Rekam Suara</button>
+      <p id="recStatus" style="margin-top: 10px; font-style: italic;">Status: Idle</p>
+
+      <div id="result">
+        <p id="output"></p>
+        <p id="probability"></p>
+        <p id="paraphrased"></p>
+        <audio id="audio" controls style="display: none;"></audio>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let brando = null;
+    let audioContextVisualizer, analyser, source, dataArray;
+    let mediaRecorder;
+    let silenceStart = null;
+    let volumeCheckInterval;
+
+    async function submitText() {
+      const text = document.getElementById("inputText").value;
+
+      Swal.fire({
+        title: 'Memproses...',
+        text: 'Dr Brando sedang menganalisis teks...',
+        allowOutsideClick: false,
+        didOpen: () => Swal.showLoading()
+      });
+
+      try {
+        const res = await fetch("/predict", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: text })
+        });
+
+        const data = await res.json();
+        Swal.close();
+        tampilkanHasil(data.text || text, data);
+      } catch (err) {
+        Swal.fire("Gagal!", "Terjadi kesalahan saat memproses teks.", "error");
+      }
+    }
+
+    async function startRecording() {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      document.getElementById("recStatus").innerText = "Status: Merekam...";
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const micSource = audioCtx.createMediaStreamSource(stream);
+      const analyserLive = audioCtx.createAnalyser();
+      micSource.connect(analyserLive);
+
+      const buffer = new Uint8Array(analyserLive.fftSize);
+
+      mediaRecorder = new MediaRecorder(stream);
+      const audioChunks = [];
+
+      mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+
+      mediaRecorder.onstop = async () => {
+        clearInterval(volumeCheckInterval);
+        document.getElementById("recStatus").innerText = "Status: Idle";
+        const blob = new Blob(audioChunks, { type: "audio/webm" });
+        const formData = new FormData();
+        formData.append("audio", blob, "recording.webm");
+
+        Swal.fire({
+          title: 'Memproses...',
+          text: 'Dr Brando sedang mendengarkan...',
+          allowOutsideClick: false,
+          didOpen: () => Swal.showLoading()
+        });
+
+        try {
+          const res = await fetch("/predict_audio", {
+            method: "POST",
+            body: formData,
+          });
+
+          const data = await res.json();
+          Swal.close();
+          tampilkanHasil(data.text, data);
+        } catch (err) {
+          Swal.fire("Gagal!", "Terjadi kesalahan saat memproses suara.", "error");
+        }
+      };
+
+      mediaRecorder.start();
+
+      silenceStart = null;
+      volumeCheckInterval = setInterval(() => {
+        analyserLive.getByteTimeDomainData(buffer);
+        let sum = 0;
+        for (let i = 0; i < buffer.length; i++) {
+          const v = (buffer[i] - 128) / 128;
+          sum += v * v;
+        }
+        const volume = Math.sqrt(sum / buffer.length);
+
+        if (volume < 0.01) {
+          if (!silenceStart) silenceStart = Date.now();
+          else if (Date.now() - silenceStart > 1000) {
+            mediaRecorder.stop();
+          }
+        } else {
+          silenceStart = null;
+        }
+      }, 200);
+    }
+
+    function tampilkanHasil(text, data) {
+      document.getElementById("output").innerHTML =
+      text + (data.label === 1
+  ? '<br>Prediksi = <strong style="color:red">Toxic</strong>'
+  : '<br>Prediksi = <strong style="color:limegreen">Tidak Toxic</strong>');
+      document.getElementById("probability").innerText =
+        "Probabilitas Toxic: " + data.probability.toFixed(4);
+      document.getElementById("paraphrased").innerText =
+        "Paraphrased: " + data.text_paraphrase;
+
+      const audio = document.getElementById("audio");
+      audio.pause();
+      audio.currentTime = 0;
+      audio.src = data.audio_url + "?t=" + new Date().getTime();
+      audio.style.display = "block";
+
+      audio.onloadedmetadata = () => {
+        setupAudioAnalyser(audio);
+        audio.play().catch(e => console.error("Play failed:", e));
+      };
+    }
+
+    function setupAudioAnalyser(audioElement) {
+      if (!audioContextVisualizer) {
+        audioContextVisualizer = new AudioContext();
+        analyser = audioContextVisualizer.createAnalyser();
+        source = audioContextVisualizer.createMediaElementSource(audioElement);
+        source.connect(analyser);
+        analyser.connect(audioContextVisualizer.destination);
+        analyser.fftSize = 64;
+        dataArray = new Uint8Array(analyser.frequencyBinCount);
+      }
+    }
+
+    // THREE.js setup
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("bg"), alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    camera.position.set(0, 0, 20);
+
+    const light = new THREE.PointLight(0xffffff, 1.5);
+    light.position.set(10, 10, 10);
+    scene.add(light);
+
+    const clock = new THREE.Clock();
+    const animateMixers = [];
+
+    const loader = new THREE.GLTFLoader();
+    loader.load("/static/karakter.glb", gltf => {
+      brando = gltf.scene;
+      brando.scale.set(15, 15, 15);
+      brando.position.set(-20, 0, -5);
+      scene.add(brando);
+
+      const mixer = new THREE.AnimationMixer(brando);
+      if (gltf.animations.length > 0) {
+        const action = mixer.clipAction(gltf.animations[0]);
+        action.play();
+      }
+      animateMixers.push(mixer);
+    }, undefined, err => console.error("GLB Error:", err));
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const delta = clock.getDelta();
+      animateMixers.forEach(mixer => mixer.update(delta));
+
+      if (analyser && brando) {
+        analyser.getByteFrequencyData(dataArray);
+        const volume = dataArray.reduce((a, b) => a + b, 0) / dataArray.length / 256;
+        brando.position.y = -1 + volume * 10;
+      }
+
+      renderer.render(scene, camera);
+    }
+
+    animate();
+  </script>
+</body>
+</html>
